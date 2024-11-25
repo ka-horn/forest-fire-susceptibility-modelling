@@ -1,0 +1,827 @@
+---
+title: "Forest_fires_Brandenburg"
+author: "Katharina Horn"
+date: "2024-10-30"
+output: html_document
+---
+
+```{r Load libraries }
+
+library(sp)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(RColorBrewer)
+library(reshape2)
+library(scales)
+library(readr)
+library(readxl)
+
+library(ggplot2) # plotting
+library(ggpubr)  # plotting multiple maps together
+
+library(grid)
+library(spatstat)
+
+library(zoo)
+
+library(terra)
+
+library(ggspatial)
+
+library(tools)
+
+library(caret)
+library(pROC)  # For AUC calculation
+
+library(sf)
+
+```
+
+
+## Random Forest (RF) Modeling
+
+After finishing data pre-processing, I will proceed with the Random Forest modeling. I want to use RF both for mapping the susceptibility of forest to forest fires, as well as predict the parameters that are most significant for the model. The following code was based on a GitHub repository by Prof. Dr. Hanna Meyer. It can be found on GitHub at https://github.com/HannaMeyer/Geostat2018/blob/master/practice/LUCmodelling.Rmd
+
+```{r Read in training data table}
+
+data <- read.csv("path-to-sample-data-frame\\sample_data.csv", 
+          sep = ",", dec = ".") 
+
+# replace with your own path, where you saved the data set
+
+```
+
+### Data split
+
+In order to keep data for a later (nearly) independent validation as well as to limit the number of data points so that the model training won't take long time, we split the total data set into 70% training data and 30% test data. Caret's createDataPartition takes care that the class distribution is the same in both datasets. We put the test data to the side and first only continue with the training data. (copyright: Hanna Meyer)
+
+```{r Data split}
+library(caret)
+
+set.seed(27)
+trainids_dyn <- createDataPartition(data$Class,list=FALSE, p=0.7) 
+# 70 % of the data is used for training
+# 30 % of the data is used for testing
+
+trainDat_dyn <- data[trainids_dyn,] # use all selected trainids for training
+testDat_dyn <- data[-trainids_dyn,] # validation data set --> use all ID's (pixels) that are not training data pixels
+
+# Convert into data frame
+trainDat_dyn_df <- as.data.frame(trainDat_dyn)
+testDat_dyn_df <- as.data.frame(testDat_dyn)
+
+```
+
+### Leave-one-year-out data split
+
+In addition to the model including the data for all years, I apply the leave-one-year-out method and run nine additional models,
+where for each model, one year is excluded. The training and testing data split is done in the same way as above. 
+
+```{r}
+library(caret)
+
+# Create Training datasets for Leave-one-year-out models (excl. one year)
+set.seed(27)
+for (year in 2014:2022) {
+  subset_name <- paste("train_wo_", year, sep = "")
+  
+  # Exclude data for the current year
+  assign(subset_name, subset(data, Year != year))
+}
+
+# Check the created subsets
+ls(pattern = "train_wo_")
+train_wo_2014
+
+# Create Testing datasets for Leave-one-year-out models (incl. only the missing year)
+set.seed(27)
+for (year in 2014:2022) {
+  subset_name <- paste("test_wo_", year, sep = "")
+  
+  # Exclude data for the current year
+  assign(subset_name, subset(data, Year == year))
+}
+
+# Check the created subsets
+ls(pattern = "test_wo_")
+test_wo_2014
+
+```
+
+### Define predictors and response
+
+For model training I need to define the predictor and response variables. As response variable we use the "Class" column of the data frame.
+
+```{r vars}
+# Define predictors that I want to work with.
+predictors_dyn <- c("twi", "slope", "aspect", "dem", "tcd", "forestedge", "broadleaf", "water", "canopy", "campsites", "streets", "urban", "railway", "military", "ocs", "bdod", "sand", "silt", "airtemp_3m", "prec_3m")
+
+# Predictors for the leave-one-year-out models are identical to the model including the data from all years
+predictors_dyn_loyo <- c("twi", "slope", "aspect", "dem", "tcd", "forestedge", "broadleaf", "water", "canopy", "campsites", "streets", "urban", "railway", "military", "ocs", "bdod", "sand", "silt", "airtemp_3m", "prec_3m")
+
+# Define response variable (Class "fire" or "non-fire")
+response <- "Class"
+
+```
+
+### Model training
+
+After defining predictors and response variable, I train the RF model. 
+
+```{r train}
+
+# Run model without tuning any paramters
+set.seed(100)
+model <- train(trainDat_dyn_df[, predictors_dyn], trainDat_dyn_df[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE)
+print(model)
+# Model results show best model performance at mtry = 2. Thus, I will use mtry = 2 as a tuning parameter for the models. 
+
+# Define tuning parameter mtry
+tuneGrid <- expand.grid(mtry = 2) # mtry = 2 is set to keep consistency between all the models that will be run. 
+
+# Run model again
+set.seed(100) # Set a seed to ensure getting the same model results in case the code has to be run several times. 
+model_mtry2 <- train(trainDat_dyn_df[, predictors_dyn], trainDat_dyn_df[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+# Print model_mtry2 to have a look at the model results. 
+print(model_mtry2)
+
+```
+
+### Leave-One-Year-Out Modelling
+
+```{r Leave-One-Year-Out Modelling}
+
+tuneGrid <- expand.grid(mtry = 2)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2014 <- train(train_wo_2014[, predictors_dyn_loyo], train_wo_2014[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2015 <- train(train_wo_2015[, predictors_dyn_loyo], train_wo_2015[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2016 <- train(train_wo_2016[, predictors_dyn_loyo], train_wo_2016[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2017 <- train(train_wo_2017[, predictors_dyn_loyo], train_wo_2017[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2018 <- train(train_wo_2018[, predictors_dyn_loyo], train_wo_2018[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2019 <- train(train_wo_2019[, predictors_dyn_loyo], train_wo_2019[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2020 <- train(train_wo_2020[, predictors_dyn_loyo], train_wo_2020[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2021 <- train(train_wo_2021[, predictors_dyn_loyo], train_wo_2021[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+set.seed(100) # If we set a seed, when we repeat the model training, we will get the same results again.
+model_wo_2022 <- train(train_wo_2022[, predictors_dyn_loyo], train_wo_2022[, response], method = "rf", trControl = trainControl(method = "cv"), importance = TRUE, tuneGrid = tuneGrid)
+
+# Print models and have a look at the model results
+print(model_wo_2014)
+print(model_wo_2015)
+print(model_wo_2016)
+print(model_wo_2017)
+print(model_wo_2018)
+print(model_wo_2019)
+print(model_wo_2020)
+print(model_wo_2021)
+print(model_wo_2022)
+
+```
+
+## Variable importance
+
+Having a look at the varImp we see which variables are important to delineate the fire / non-fire classes. 
+I use the model_mtry2 for calculating the variable importance, since this model includes all of the available 
+data of all of the years and should therefore be the most reliable.
+
+```{r Visualize variable importance}
+
+par(mfrow=c(1,3))
+plot(varImp(model_mtry2))
+plot(varImp(model_wo_2016))
+plot(varImp(model_wo_2022))
+
+# Plot and save the varImp for model_mtry2
+png(filename = "D:\\Nextcloud\\Documents\\Master_Thesis\\04_RESULTS\\varImp_mtry2.png", height = 10, width = 16, units = "cm", res = 600)
+par(mar = c(5, 4, 2, 2) + 0.1) # increase the spacing between variables on the y-axis
+plot(varImp(model_mtry2, names = var_names))
+dev.off()
+
+```
+
+### Wilcox Test to test significance of predictors
+
+To get an idea about the relationships between the predictor data and the (non-)fire class, we can check the value distribution
+of different predictors among fire and non-fire points. To check, whether the difference in value distributions among both classes
+is significant, I implement a Wilcox test. 
+<https://de.wikipedia.org/wiki/Wilcoxon-Mann-Whitney-Test> (Wilcox Test to check, whether the relation is significant or not)
+
+```{r Wilcox test for all predictor variables}
+
+# Perform Wilcox-Test for all predictor variables----
+wilcox_broadleaf <- wilcox.test(broadleaf ~ Class, data = data)
+wilcox_urban <- wilcox.test(urban ~ Class, data = data)
+wilcox_railway <- wilcox.test(railway ~ Class, data = data)
+wilcox_silt <- wilcox.test(silt ~ Class, data = data)
+wilcox_campsites <- wilcox.test(campsites ~ Class, data = data)
+wilcox_dem <- wilcox.test(dem ~ Class, data = data)
+wilcox_canopy <- wilcox.test(canopy ~ Class, data = data)
+wilcox_sand <- wilcox.test(sand ~ Class, data = data)
+wilcox_bdod <- wilcox.test(bdod ~ Class, data = data)
+wilcox_forestedge <- wilcox.test(forestedge ~ Class, data = data)
+wilcox_ocs <- wilcox.test(ocs ~ Class, data = data)
+wilcox_streets <- wilcox.test(streets ~ Class, data = data)
+wilcox_water <- wilcox.test(water ~ Class, data = data)
+wilcox_military <- wilcox.test(military ~ Class, data = data)
+wilcox_slope <- wilcox.test(slope ~ Class, data = data)
+wilcox_tcd <- wilcox.test(tcd ~ Class, data = data)
+wilcox_airtemp_3m <- wilcox.test(airtemp_3m ~ Class, data = data)
+wilcox_twi <- wilcox.test(twi ~ Class, data = data)
+wilcox_prec_3m <- wilcox.test(prec_3m ~ Class, data = data)
+wilcox_aspect <- wilcox.test(aspect ~ Class, data = data)
+
+# Extract the rounded p-values for further processing
+blf_wx <- signif(wilcox_broadleaf$p.value, digits = 3) 
+urban_wx <- signif(wilcox_urban$p.value, digits = 3)
+rail_wx <- signif(wilcox_railway$p.value, digits = 3)
+silt_wx <- signif(signif(wilcox_silt$p.value, digits = 3), digits = 3)
+campsites_wx <- signif(wilcox_campsites$p.value, digits = 3)
+dem_wx <- signif(wilcox_dem$p.value, digits = 3)
+canopy_wx <- signif(wilcox_canopy$p.value, digits = 3)
+sand_wx <- signif(wilcox_sand$p.value, digits = 3)
+bdod_wx <- signif(wilcox_bdod$p.value, digits = 3)
+forestedge_wx <- signif(wilcox_forestedge$p.value, digits = 3)
+ocs_wx <- signif(wilcox_ocs$p.value, digits = 3)
+streets_wx <- signif(wilcox_streets$p.value, digits = 3)
+water_wx <- signif(wilcox_water$p.value, digits = 3)
+military_wx <- signif(wilcox_military$p.value, digits = 3)
+slope_wx <- signif(wilcox_slope$p.value, digits = 3)
+tcd_wx <- signif(wilcox_tcd$p.value, digits = 3)
+airtemp_3m_wx <- signif(wilcox_airtemp_3m$p.value, digits = 3)
+twi_wx <- signif(wilcox_twi$p.value, digits = 3)
+prec_3m_wx <- signif(wilcox_prec_3m$p.value, digits = 3)
+aspect_wx <- signif(wilcox_aspect$p.value, digits = 3)
+
+```
+
+### Boxplots of value distribution of the three most important predictors
+
+I now visualize the value distribution between both classes for the three most significant predictor variables. 
+Those are distance to urban settlements, percentage of broadleaf forest, and distance to railways. 
+
+```{r featurePlot}
+## Plot three boxplots:
+# Urban distance boxplot
+bxp_urban <- 
+  ggplot(data, aes(x = Class, y = urban, color = Class)) +
+  geom_boxplot(color = "black", fill = "lightgrey") +
+  theme_minimal() +
+  labs(x = NULL, y = "Distance to urban\nsettlements (m)", size = 5) +
+  geom_rect(aes(xmin = 2.75, xmax = 4, 
+                ymin = 3600, ymax = 4000),
+            fill = "transparent", color = "black", alpha = 0.5) +
+  annotate("text", x = 0.82, y = max(data$urban)-30,
+           label = paste("p =", signif(urban_wx, digits = 3)), 
+           hjust = -1.9, vjust = 1.6, size = 3, color = "black") +
+  guides(color = FALSE) +  # drop the legend
+  theme(axis.text = element_text(size = 9))
+
+# Broadleaf boxplot
+bxp_blf <- 
+  ggplot(data, aes(x = Class, y = broadleaf)) +
+  geom_boxplot(color = "black", fill = "lightgrey") +
+  theme_minimal() +
+  labs(x = NULL, y = "Percentage of\nbroadleaf forest", size = 5) +
+  geom_rect(aes(xmin = 2.75, xmax = 4, 
+                ymin = 0.9, ymax = 1),
+            fill = "transparent", color = "black", alpha = 0.5) +
+  annotate("text", x = 1, y = 1,
+           label = paste("p =", signif(blf_wx, digits = 3)), 
+           hjust = -1.8, vjust = 1.7, size = 3, color = "black") +
+  guides(color = FALSE) +  # drop the legend
+  theme(axis.text = element_text(size = 9))
+
+# Railway distance boxplot
+bxp_railway <- 
+  ggplot(data, aes(x = Class, y = railway, color = Class)) +
+  geom_boxplot(color = "black", fill = "lightgrey") +
+  theme_minimal() +
+  labs(x = NULL, y = "Distance to\nrailways (m)", size = 5) +
+  geom_rect(aes(xmin = 2.75, xmax = 4, 
+                ymin = 15500, ymax = 17500),
+            fill = "transparent", color = "black", alpha = 0.5) +
+  annotate("text", x = 0.2, y = max(data$railway)-200,
+           label = paste("p =", signif(rail_wx, digits = 3)), 
+           hjust = -2.25, vjust = 1, size = 3, color = "black") +
+  guides(color = FALSE) +  # drop the legend
+  theme(axis.text = element_text(size = 9))
+
+bxp_railway
+bxp_blf
+bxp_urban
+
+```
+
+## Model prediction
+
+I predict forest fire susceptibility for four different scenarios. Those are June 2016, June 2022, 
+June 2081-2100 (SSP5-8.5), and June 2081-2100 (SSP5-8.5) including future land cover change. To model the present 
+scenarios, I am using the respective leave-one-year-out models (model_wo_2016, model_wo_2022). To model the future 
+scenarios, I use the model that includes data from all years (model_mtry2). 
+
+
+```{r predict}
+
+# create RasterStack for prediction (The layers must be the same as the predictors_dyn columns)
+# To run this part of the code, the future climate layers and land cover change layers need to be loaded. 
+
+# Combine layers for the prediction of the four scenarios
+library(terra)
+data_predict_june16 <- c(twi_proj, slope_proj, aspect_proj, dem_proj, tcd_proj, 
+                         forestedgeprox_proj, broadleaf_proj, waterprox_proj, canopy_proj, 
+                         campprox_proj, streetprox_proj, urban_proj, railprox_proj, 
+                         militprox_proj, ocs_proj, bdod_proj, sand_proj, silt_proj, 
+                         airtemp_2016_06_3m_avg, prec_2016_06_3m_avg)
+
+data_predict_june22 <- c(twi_proj, slope_proj, aspect_proj, dem_proj, tcd_proj, 
+                         forestedgeprox_proj, broadleaf_proj, waterprox_proj, 
+                         canopy_proj, campprox_proj, streetprox_proj, urban_proj, 
+                         railprox_proj, militprox_proj, ocs_proj, bdod_proj, 
+                         sand_proj, silt_proj, airtemp_2022_06_3m_avg, prec_2022_06_3m_avg)
+
+data_predict_06_2081_ssp370 <- c(twi_proj, slope_proj, aspect_proj, dem_proj, 
+                                 tcd_proj, forestedgeprox_proj, broadleaf_proj, 
+                                 waterprox_proj, canopy_proj, campprox_proj, 
+                                 streetprox_proj, urban_proj, railprox_proj, 
+                                 militprox_proj, ocs_proj, bdod_proj, sand_proj, 
+                                 silt_proj, airtemp_06_2081_ssp370, prec_06_2081_ssp370)
+
+data_predict_06_2081_ssp585 <- c(twi_proj, slope_proj, aspect_proj, dem_proj, 
+                                 tcd_proj, forestedgeprox_proj, broadleaf_proj, 
+                                 waterprox_proj, canopy_proj, campprox_proj, 
+                                 streetprox_proj, urban_proj, railprox_proj, 
+                                 militprox_proj, ocs_proj, bdod_proj, sand_proj, 
+                                 silt_proj, airtemp_06_2081_ssp585, 
+                                 prec_06_2081_ssp585)
+
+## Predict susceptibility scores
+# Predicting the current scenarios using the leave-one-year-out models. 
+predicted_probs_06_2016 <- terra::predict(object = data_predict_june16, 
+                                          model = model_wo_2016, type = "prob", 
+                                          na.rm = TRUE)
+predicted_probs_06_2022 <- terra::predict(object = data_predict_june22, 
+                                          model = model_wo_2022, type = "prob", 
+                                          na.rm = TRUE)
+
+# Predicting the future scenarios using the model_mtry2. 
+predicted_probs_06_2081_ssp370 <- terra::predict(object = data_predict_06_2081_ssp370, 
+                                                 model = model_mtry2, type = "prob", 
+                                                 na.rm = TRUE)
+predicted_probs_06_2081_ssp585 <- terra::predict(object = data_predict_06_2081_ssp585, 
+                                                 model = model_mtry2, type = "prob", 
+                                                 na.rm = TRUE)
+
+# Plot results
+plot(predicted_probs_06_2016)
+
+# Export resulting raster files
+writeRaster(predicted_probs_06_2016, "path-to-file\\pred_06_2016_new.tif", overwrite = TRUE)
+writeRaster(predicted_probs_06_2022, "path-to-file\\pred_06_2022_new.tif", overwrite = TRUE)
+writeRaster(predicted_probs_06_2081_ssp370, "path-to-file\\Probability_Rasters\\pred_06_2081_ssp370.tif", overwrite = TRUE)
+writeRaster(predicted_probs_06_2081_ssp585, "path-to-file\\pred_06_2081_ssp585.tif", overwrite = TRUE)
+
+```
+
+After running all this, the results can be plotted using ggplot. 
+
+```{r Plot Susceptibility predictions}
+
+# Susceptibility rasters
+sus_2016_all <- rast("path-to-file\\pred_06_2016_new.tif") # replace with actual file path
+sus_2022_all <- rast("path-to-file\\pred_06_2022_new.tif") # replace with actual file path
+sus_ssp370_all <- rast("path-to-file\\pred_06_2081_ssp370.tif") # replace with actual file path
+sus_ssp585_all <- rast("path-to-file\\pred_06_2081_ssp585.tif") # replace with actual file path
+
+# Filter only fire
+sus_2016 <- sus_2016_all[["fire"]]
+sus_2022 <- sus_2022_all[["fire"]]
+sus_ssp370 <- sus_ssp370_all[[1]]
+sus_ssp585 <- sus_ssp585_all[[1]]
+
+# Convert susceptibility rasters in percentage rasters
+sus_2016_pct <- sus_2016 * 100
+
+# Convert rasters into data frames
+sus_2016_df <- as.data.frame(sus_2016, xy = TRUE)
+sus_2022_df <- as.data.frame(sus_2022, xy = TRUE)
+sus_ssp370_df <- as.data.frame(sus_ssp370, xy = TRUE)
+sus_ssp585_df <- as.data.frame(sus_ssp585, xy = TRUE)
+
+# Define color ramp
+color_ramp <- colorRampPalette(c("#020d47", "#002ae7", "#39b5ff", "#00ff9b", "#fcf599", 
+                                 "#ff980c", "#ff2100", "#930c0c", "#460000"))(255)
+
+# Plot susceptibility maps
+map_sus_2016 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = sus_2016_df) +       # add raster data set
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +                       
+  scale_fill_gradientn(colours = color_ramp) +                                  # set legend colours
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nSusceptibility (%)")  +
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) +
+  theme(legend.position = "left") +
+  theme_minimal()                                                               # add minimal theme
+
+map_sus_2022 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = sus_2022_df) +          
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +
+  theme(legend.position = "left") +
+  theme_minimal() +                                                                
+  scale_fill_gradientn(colours = color_ramp) +                                     
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nSusceptibility (%)") + 
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+  
+map_sus_ssp370 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = sus_ssp370_df) + 
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +          
+  theme_minimal() +                                                                
+  theme(legend.position = "left") +
+  scale_fill_gradientn(colours = color_ramp) +                                     
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nSusceptibility (%)") +
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+  
+map_sus_ssp585 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = sus_ssp585_df) + 
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +
+  theme_minimal() +                                                               
+  theme(legend.position = "left") +
+  scale_fill_gradientn(colours = color_ramp) +                                     
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nSusceptibility (%)") +
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+
+# Combine susceptibility maps
+png("path-to-file\\susceptibility_ggplot.png", 
+    width = 16, height = 13.5, units = "cm", res = 300)
+susceptibility <- ggarrange(map_sus_2016, map_sus_2022, map_sus_ssp370, map_sus_ssp585,
+          labels = c("  2016", "  2022", "SSP3.70", "SSP5.85"), 
+          ncol = 2, nrow = 2, 
+          common.legend = TRUE, legend = "bottom")
+susceptibility
+dev.off()
+
+```
+
+```{r Compute and plot anomalies}
+
+# Compute anomalies 
+anomaly_2022 <- (sus_2022 - sus_2016)
+anomaly_2081_ssp370 <- (sus_ssp370 - sus_2016)
+anomaly_2081_ssp585 <- (sus_ssp585 - sus_2016)
+
+plot(anomaly_2081_ssp585)                        
+
+# Multiply by 100 to achieve percentage values
+anomaly_2022_percent <- anomaly_2022 * 100
+anomaly_2081_ssp370_percent <- anomaly_2081_ssp370 * 100
+anomaly_2081_ssp585_percent <- anomaly_2081_ssp585 * 100
+
+
+# Save anomaly rasters
+writeRaster(anomaly_2022, "path-to-file\\anomaly_2022.tif", overwrite = TRUE)
+writeRaster(anomaly_2081_ssp370, "path-to-file\\anomaly_ssp370.tif", overwrite = TRUE)
+writeRaster(anomaly_2081_ssp585, "path-to-file\\anomaly_ssp585.tif", overwrite = TRUE)
+
+# Save percent anomalies
+writeRaster(anomaly_2022_percent, "path-to-file\\anomaly_2022_pct.tif", overwrite = TRUE)
+writeRaster(anomaly_2081_ssp370_percent, "path-to-file\\anomaly_2081_ssp370_pct.tif", overwrite = TRUE)
+writeRaster(anomaly_2081_ssp585_percent, "path-to-file\\anomaly_2081_ssp585_pct.tif", overwrite = TRUE)
+
+# Convert rasters into data frames
+anom_2022_df <- as.data.frame(anomaly_2022, xy = TRUE)
+anom_ssp370_df <- as.data.frame(anomaly_2081_ssp370, xy = TRUE)
+anom_ssp585_df <- as.data.frame(anomaly_2081_ssp585, xy = TRUE)
+
+# Define color ramp
+color_ramp <- colorRampPalette(c("#020d47", "#002ae7", "#39b5ff", "#00ff9b", "#fcf599", 
+                                 "#ff980c", "#ff2100", "#930c0c", "#460000"))(255)
+
+# Anomaly maps
+map_anom_2022 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = anom_2022_df) +          # add raster data set
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +
+  theme(legend.position = "left") +
+  theme_minimal() +                                                       # add minimal theme
+  scale_fill_gradientn(colours = color_ramp, limits = c(-20, 20)) +    # set legend colours
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nAnomaly (%) ") + 
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+
+map_anom_ssp370 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = anom_ssp370_df) +  
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +          
+  theme_minimal() +                                                 
+  theme(legend.position = "left") +
+  scale_fill_gradientn(colours = color_ramp, limits = c(-20, 20)) +                      
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nAnomaly (%) ") +
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+
+map_anom_ssp585 <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill = fire*100), data = anom_ssp585_df) +
+  geom_sf(bb, mapping = aes(), color = 'black', fill = NA) +          
+  theme_minimal() +                                                
+  theme(legend.position = "left") +
+  scale_fill_gradientn(colours = color_ramp, limits = c(-20, 20)) +                     
+  labs(x = NULL, y = NULL, fill = "Forest Fire\nAnomaly (%) ") +
+  scale_x_continuous(breaks = seq(11.0, 15.0, by = 1)) +
+  scale_y_continuous(breaks = seq(51.0, 54, by = 1)) 
+
+# Combine anomaly maps
+png("path-to-file\\anomaly_ggplot_new.png", 
+    width = 16, height = 22.2, units = "cm", res = 300)
+anomalies <- ggarrange(map_anom_2022, map_anom_ssp370, map_anom_ssp585,
+                    labels = c("  2022", "SSP3.70", "SSP5.85"), 
+                    ncol = 1, nrow = 3, 
+                    common.legend = TRUE, legend = "bottom")
+anomalies
+dev.off()
+
+```
+
+```{r Compute statistics of susceptibilies}
+
+stats_2016 <- summary(sus_2016_df$fire)
+stats_2022 <- summary(sus_2022_df$fire)
+stats_ssp370 <- summary(sus_ssp370_df$fire)
+stats_ssp585 <- summary(sus_ssp585_df$fire)
+
+sd_2016 <- sd(sus_2016_df$fire)
+sd_2022 <- sd(sus_2022_df$fire)
+sd_ssp370 <- sd(sus_ssp370_df$fire)
+sd_ssp585 <- sd(sus_ssp585_df$fire)
+
+# Compute standard deviation
+stats_2016
+stats_2022
+stats_ssp370
+stats_ssp585
+
+# Create an empty boxplot
+bp <- boxplot(sus_2016_df$fire, plot = FALSE)
+
+# Add the other boxplots
+bp <- boxplot(sus_2022_df$fire, add = TRUE, at = bp$names + 1)
+bp <- boxplot(sus_ssp370_df$fire, add = TRUE, at = bp$names + 2)
+bp <- boxplot(sus_ssp585_df$fire, add = TRUE, at = bp$names + 3)
+
+# Add legend
+legend("topright", legend = c("2016", "2022", "ssp370", "ssp585"), fill = bp$fill)
+
+```
+
+## Model validation
+
+```{r valid}
+
+# Model validation
+pred_valid_all <- predict(model_mtry2,testDat_dyn_df)
+
+# Contingency table
+# diagonal = correctly classified data points
+table(testDat_dyn_df$Class,pred_valid_all)
+
+# Make predictions on the test set
+predictions <- predict(model_mtry2, newdata = testDat_dyn_df[, predictors_dyn])
+
+# Convert predictions to a factor with the same levels as response
+testDat_dyn_df[, response] <- factor(testDat_dyn_df[, response])
+
+# Confusion matrix
+conf_matrix <- confusionMatrix(predictions, testDat_dyn_df[, response])
+
+# Accuracy
+accuracy <- conf_matrix$overall["Accuracy"]
+
+# Kappa
+kappa <- conf_matrix$overall["Kappa"]
+
+# Precision
+precision <- conf_matrix$byClass["Precision"]
+
+# Recall (Sensitivity)
+recall <- conf_matrix$byClass["Sensitivity"]
+
+# F1-Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# AUC
+library(pROC) 
+roc_mtry2 <- roc(testDat_dyn_df[, response], as.numeric(predictions))
+predictions <- as.numeric(predictions)
+auc <- auc(roc_mtry2)
+
+# Print the metrics
+cat("Accuracy:", accuracy, "\n")
+cat("Kappa:", kappa, "\n")
+cat("Precision:", precision, "\n")
+cat("Recall (Sensitivity):", recall, "\n")
+cat("F1-Score:", f1_score, "\n")
+cat("AUC:", auc, "\n")
+
+```
+
+
+```{r Leave-one-year-out Model Validation}
+
+# Model validation
+pred_valid_wo_2014 <- predict(model_wo_2014, test_wo_2014)
+pred_valid_wo_2015 <- predict(model_wo_2015, test_wo_2015)
+pred_valid_wo_2016 <- predict(model_wo_2016, test_wo_2016)
+pred_valid_wo_2017 <- predict(model_wo_2017, test_wo_2017)
+pred_valid_wo_2018 <- predict(model_wo_2018, test_wo_2018)
+pred_valid_wo_2019 <- predict(model_wo_2019, test_wo_2019)
+pred_valid_wo_2020 <- predict(model_wo_2020, test_wo_2020)
+pred_valid_wo_2021 <- predict(model_wo_2021, test_wo_2021)
+pred_valid_wo_2022 <- predict(model_wo_2022, test_wo_2022)
+
+## Contingency table
+# diagonal = correctly classified data points
+table(test_wo_2014$Class,pred_valid_wo_2014)
+table(test_wo_2015$Class,pred_valid_wo_2015)
+table(test_wo_2016$Class,pred_valid_wo_2016)
+table(test_wo_2017$Class,pred_valid_wo_2017)
+table(test_wo_2018$Class,pred_valid_wo_2018)
+table(test_wo_2019$Class,pred_valid_wo_2019)
+table(test_wo_2020$Class,pred_valid_wo_2020)
+table(test_wo_2021$Class,pred_valid_wo_2021)
+table(test_wo_2022$Class,pred_valid_wo_2022)
+
+# Predictions Leave-one-year-out
+predictions_wo2014 <- predict(model_wo_2014, newdata = test_wo_2014[, predictors_dyn_loyo])
+predictions_wo2015 <- predict(model_wo_2015, newdata = test_wo_2015[, predictors_dyn_loyo])
+predictions_wo2016 <- predict(model_wo_2016, newdata = test_wo_2016[, predictors_dyn_loyo])
+predictions_wo2017 <- predict(model_wo_2017, newdata = test_wo_2017[, predictors_dyn_loyo])
+predictions_wo2018 <- predict(model_wo_2018, newdata = test_wo_2018[, predictors_dyn_loyo])
+predictions_wo2019 <- predict(model_wo_2019, newdata = test_wo_2019[, predictors_dyn_loyo])
+predictions_wo2020 <- predict(model_wo_2020, newdata = test_wo_2020[, predictors_dyn_loyo])
+predictions_wo2021 <- predict(model_wo_2021, newdata = test_wo_2021[, predictors_dyn_loyo])
+predictions_wo2022 <- predict(model_wo_2022, newdata = test_wo_2022[, predictors_dyn_loyo])
+
+# Convert predictions to a factor with the same levels as response
+test_wo_2014[, response] <- factor(test_wo_2014[, response])
+test_wo_2015[, response] <- factor(test_wo_2015[, response])
+test_wo_2016[, response] <- factor(test_wo_2016[, response])
+test_wo_2017[, response] <- factor(test_wo_2017[, response])
+test_wo_2018[, response] <- factor(test_wo_2018[, response])
+test_wo_2019[, response] <- factor(test_wo_2019[, response])
+test_wo_2020[, response] <- factor(test_wo_2020[, response])
+test_wo_2021[, response] <- factor(test_wo_2021[, response])
+test_wo_2022[, response] <- factor(test_wo_2022[, response])
+
+# Confusion Matrix
+conf_matrix_wo2014 <- confusionMatrix(predictions_wo2014, test_wo_2014[,response])
+conf_matrix_wo2015 <- confusionMatrix(predictions_wo2015, test_wo_2015[,response])
+conf_matrix_wo2016 <- confusionMatrix(predictions_wo2016, test_wo_2016[,response])
+conf_matrix_wo2017 <- confusionMatrix(predictions_wo2017, test_wo_2017[,response])
+conf_matrix_wo2018 <- confusionMatrix(predictions_wo2018, test_wo_2018[,response])
+conf_matrix_wo2019 <- confusionMatrix(predictions_wo2019, test_wo_2019[,response])
+conf_matrix_wo2020 <- confusionMatrix(predictions_wo2020, test_wo_2020[,response])
+conf_matrix_wo2021 <- confusionMatrix(predictions_wo2021, test_wo_2021[,response])
+conf_matrix_wo2022 <- confusionMatrix(predictions_wo2022, test_wo_2022[,response])
+
+# Accuracy
+acc_wo_2014 <- conf_matrix_wo2014$overall["Accuracy"]
+acc_wo_2015 <- conf_matrix_wo2015$overall["Accuracy"]
+acc_wo_2016 <- conf_matrix_wo2016$overall["Accuracy"]
+acc_wo_2017 <- conf_matrix_wo2017$overall["Accuracy"]
+acc_wo_2018 <- conf_matrix_wo2018$overall["Accuracy"]
+acc_wo_2019 <- conf_matrix_wo2019$overall["Accuracy"]
+acc_wo_2020 <- conf_matrix_wo2020$overall["Accuracy"]
+acc_wo_2021 <- conf_matrix_wo2021$overall["Accuracy"]
+acc_wo_2022 <- conf_matrix_wo2022$overall["Accuracy"]
+
+acc_vals <- c(acc_wo_2014, acc_wo_2015, acc_wo_2016, acc_wo_2017,
+                acc_wo_2018,acc_wo_2019, acc_wo_2020, acc_wo_2021, 
+                acc_wo_2022)
+mean_acc <- mean(acc_vals)
+print(mean_acc)
+
+# Kappa
+kappa_wo_2014 <- conf_matrix_wo2014$overall["Kappa"]
+kappa_wo_2015 <- conf_matrix_wo2015$overall["Kappa"]
+kappa_wo_2016 <- conf_matrix_wo2016$overall["Kappa"]
+kappa_wo_2017 <- conf_matrix_wo2017$overall["Kappa"]
+kappa_wo_2018 <- conf_matrix_wo2018$overall["Kappa"]
+kappa_wo_2019 <- conf_matrix_wo2019$overall["Kappa"]
+kappa_wo_2020 <- conf_matrix_wo2020$overall["Kappa"]
+kappa_wo_2021 <- conf_matrix_wo2021$overall["Kappa"]
+kappa_wo_2022 <- conf_matrix_wo2022$overall["Kappa"]
+
+kappa_vals <- c(kappa_wo_2014, kappa_wo_2015, kappa_wo_2016, kappa_wo_2017,
+                kappa_wo_2018,kappa_wo_2019, kappa_wo_2020, kappa_wo_2021, 
+                kappa_wo_2022)
+mean_kappa <- mean(kappa_vals)
+print(mean_kappa)
+
+# Precision
+precision_wo_2014 <- conf_matrix_wo2014$byClass["Precision"]
+precision_wo_2015 <- conf_matrix_wo2015$byClass["Precision"]
+precision_wo_2016 <- conf_matrix_wo2016$byClass["Precision"]
+precision_wo_2017 <- conf_matrix_wo2017$byClass["Precision"]
+precision_wo_2018 <- conf_matrix_wo2018$byClass["Precision"]
+precision_wo_2019 <- conf_matrix_wo2019$byClass["Precision"]
+precision_wo_2020 <- conf_matrix_wo2020$byClass["Precision"]
+precision_wo_2021 <- conf_matrix_wo2021$byClass["Precision"]
+precision_wo_2022 <- conf_matrix_wo2022$byClass["Precision"]
+
+precision_vals <- c(precision_wo_2014, precision_wo_2015, precision_wo_2016, precision_wo_2017,
+                    precision_wo_2018,precision_wo_2019, precision_wo_2020, precision_wo_2021, 
+                    precision_wo_2022)
+mean_precision <- mean(precision_vals)
+print(mean_precision)
+
+# Sensitivity
+sensitivity_wo_2014 <- conf_matrix_wo2014$byClass["Sensitivity"]
+sensitivity_wo_2015 <- conf_matrix_wo2015$byClass["Sensitivity"]
+sensitivity_wo_2016 <- conf_matrix_wo2016$byClass["Sensitivity"]
+sensitivity_wo_2017 <- conf_matrix_wo2017$byClass["Sensitivity"]
+sensitivity_wo_2018 <- conf_matrix_wo2018$byClass["Sensitivity"]
+sensitivity_wo_2019 <- conf_matrix_wo2019$byClass["Sensitivity"]
+sensitivity_wo_2020 <- conf_matrix_wo2020$byClass["Sensitivity"]
+sensitivity_wo_2021 <- conf_matrix_wo2021$byClass["Sensitivity"]
+sensitivity_wo_2022 <- conf_matrix_wo2022$byClass["Sensitivity"]
+
+sensitivity_vals <- c(sensitivity_wo_2014, sensitivity_wo_2015, sensitivity_wo_2016, sensitivity_wo_2017,
+                sensitivity_wo_2018,sensitivity_wo_2019, sensitivity_wo_2020, sensitivity_wo_2021, 
+                sensitivity_wo_2022)
+mean_sensitivity <- mean(sensitivity_vals)
+print(mean_sensitivity)
+
+# F1-Score
+f1_score_wo_2014 <- 2 * (precision_wo_2014 * sensitivity_wo_2014) / (precision_wo_2014 + sensitivity_wo_2014)
+f1_score_wo_2015 <- 2 * (precision_wo_2015 * sensitivity_wo_2015) / (precision_wo_2015 + sensitivity_wo_2015)
+f1_score_wo_2016 <- 2 * (precision_wo_2016 * sensitivity_wo_2016) / (precision_wo_2016 + sensitivity_wo_2016)
+f1_score_wo_2017 <- 2 * (precision_wo_2017 * sensitivity_wo_2017) / (precision_wo_2017 + sensitivity_wo_2017)
+f1_score_wo_2018 <- 2 * (precision_wo_2018 * sensitivity_wo_2018) / (precision_wo_2018 + sensitivity_wo_2018)
+f1_score_wo_2019 <- 2 * (precision_wo_2019 * sensitivity_wo_2019) / (precision_wo_2019 + sensitivity_wo_2019)
+f1_score_wo_2020 <- 2 * (precision_wo_2020 * sensitivity_wo_2020) / (precision_wo_2020 + sensitivity_wo_2020)
+f1_score_wo_2021 <- 2 * (precision_wo_2021 * sensitivity_wo_2021) / (precision_wo_2021 + sensitivity_wo_2021)
+f1_score_wo_2022 <- 2 * (precision_wo_2022 * sensitivity_wo_2022) / (precision_wo_2022 + sensitivity_wo_2022)
+
+f1_score_vals <- c(f1_score_wo_2014, f1_score_wo_2015, f1_score_wo_2016, f1_score_wo_2017,
+                  f1_score_wo_2018,f1_score_wo_2019, f1_score_wo_2020, f1_score_wo_2021, 
+                  f1_score_wo_2022)
+mean_f1_score <- mean(f1_score_vals)
+print(mean_f1_score)
+
+# ROC & AUC
+library(pROC)
+
+roc_curve_wo_2014 <- roc(test_wo_2014[, response], as.numeric(predictions_wo2014))
+predictions_wo_2014 <- as.numeric(predictions_wo2014)
+auc_wo_2014 <- auc(roc_curve_wo_2014)
+roc_curve_wo_2015 <- roc(test_wo_2015[, response], as.numeric(predictions_wo2015))
+predictions_wo_2015 <- as.numeric(predictions_wo2015)
+auc_wo_2015 <- auc(roc_curve_wo_2015)
+roc_curve_wo_2016 <- roc(test_wo_2016[, response], as.numeric(predictions_wo2016))
+predictions_wo_2016 <- as.numeric(predictions_wo2016)
+auc_wo_2016 <- auc(roc_curve_wo_2016)
+roc_curve_wo_2017 <- roc(test_wo_2017[, response], as.numeric(predictions_wo2017))
+predictions_wo_2017 <- as.numeric(predictions_wo2017)
+auc_wo_2017 <- auc(roc_curve_wo_2017)
+roc_curve_wo_2018 <- roc(test_wo_2018[, response], as.numeric(predictions_wo2018))
+predictions_wo_2018 <- as.numeric(predictions_wo2018)
+auc_wo_2018 <- auc(roc_curve_wo_2018)
+roc_curve_wo_2019 <- roc(test_wo_2019[, response], as.numeric(predictions_wo2019))
+predictions_wo_2019 <- as.numeric(predictions_wo2019)
+auc_wo_2019 <- auc(roc_curve_wo_2019)
+roc_curve_wo_2020 <- roc(test_wo_2020[, response], as.numeric(predictions_wo2020))
+predictions_wo_2020 <- as.numeric(predictions_wo2020)
+auc_wo_2020 <- auc(roc_curve_wo_2020)
+roc_curve_wo_2021 <- roc(test_wo_2021[, response], as.numeric(predictions_wo2021))
+predictions_wo_2021 <- as.numeric(predictions_wo2021)
+auc_wo_2021 <- auc(roc_curve_wo_2021)
+roc_curve_wo_2022 <- roc(test_wo_2022[, response], as.numeric(predictions_wo2022))
+predictions_wo_2022 <- as.numeric(predictions_wo2022)
+auc_wo_2022 <- auc(roc_curve_wo_2022)
+
+auc_vals <- c(auc_wo_2014, auc_wo_2015, auc_wo_2016, auc_wo_2017,
+                auc_wo_2018,auc_wo_2019, auc_wo_2020, auc_wo_2021, 
+                auc_wo_2022)
+mean_auc <- mean(auc_vals)
+print(mean_auc)
+print(auc_vals)
+
+```

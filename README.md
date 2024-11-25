@@ -14,4 +14,4 @@ R.Studio version 2024.9.1.394 and R version 4.4.1 (2024-06-14 ucrt) "Race for yo
 
 ### Additional information
 This code is related to the preprint "Modelling Current and Future Forest Fire Susceptibility in north-east Germany" that can be found under https://doi.org/10.5194/egusphere-2024-1380. 
-For further questions regarding data or code, please contact the main author Katharina Horn (k.horn@tu-berlin.de). 
+For further questions regarding data or code, please refer to the related publication.

@@ -10,8 +10,7 @@ Using the sample dataset, the code can be executed up to the section: "Boxplots 
 However, the subsequent sections on "Model Prediction" and "Model Validation" are included for illustration purposes only and will require additional datasets to run.
 
 ### Requirements
-R.Studio version 2024.9.1.394
-R version 4.4.1 (2024-06-14 ucrt) "Race for your Life"
+R.Studio version 2024.9.1.394 and R version 4.4.1 (2024-06-14 ucrt) "Race for your Life"
 
 ### Additional information
 This code is related to the preprint "Modelling Current and Future Forest Fire Susceptibility in north-east Germany" that can be found under https://doi.org/10.5194/egusphere-2024-1380. 

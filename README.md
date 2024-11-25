@@ -1,6 +1,6 @@
 # Forest Fire Susceptibility Modeling in North-East Germany
 
-This repository contains the code used to model current and future forest fire susceptibility in north-east Germany under different Shared Socio-economic Pathways (SSPs).
+This repository contains the code used to model current and future forest fire susceptibility in north-east Germany under different Shared Socio-economic Pathways (SSPs). Furthermore, a sample data frame (sample-data.csv) provides information on the format of the input data that can be used for testing the model workflow. 
 
 ### About the Data
 Due to restrictions on sharing the original datasets provided by the Lower Forestry Authority of Brandenburg, we have included a sample dataset (sample_data.csv). This dataset contains randomized coordinates in place of the actual forest fire locations used in the study.
